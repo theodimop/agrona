@@ -1,0 +1,106 @@
+Agrona -> 
+Why 1-1 has an extra HEADER_LENGTH added to recordLength that *-1 does not
+Changed and some texts are failing,
+Seems to be related to the below
+
+------------------
+1-1 RB Min capacity is 16Bytes
+*-1 RB Min capacity is 8Bytes
+Hence there are some subtle differences in the edge cases 
+
+-------------------
+
+Why RecordDescriptor starts from 128 not from 0?
+This is because the Trailer Length must be power of 2 as its added to capacity for the total capacity of RB.
+They chose to start writing from 128, they could write from 0 and bump the trailer length in the end
+Understanding is correct, changing to the following does not break the tests.
+
+    {
+        int offset = 0;
+        TAIL_POSITION_OFFSET = offset;
+        offset += (BitUtil.CACHE_LINE_LENGTH * 2);
+
+        HEAD_CACHE_POSITION_OFFSET = offset;
+        offset += (BitUtil.CACHE_LINE_LENGTH * 2);
+
+        HEAD_POSITION_OFFSET = offset;
+        offset += (BitUtil.CACHE_LINE_LENGTH * 2);
+
+        CORRELATION_COUNTER_OFFSET = offset;
+        offset += (BitUtil.CACHE_LINE_LENGTH * 2);
+
+        CONSUMER_HEARTBEAT_OFFSET = offset;
+        offset += (BitUtil.CACHE_LINE_LENGTH * 2);
+
+        // bump the trailer length so its power of 2
+        offset += (BitUtil.CACHE_LINE_LENGTH * 2);
+        TRAILER_LENGTH = offset;
+    }
+    
+    ------
+    Why leave 2 cache line space between instead of 1?
+    Initially it was one, then Marting Thompson added the 
+    https://github.com/real-logic/agrona/commit/c673175170d4f6b13c92362228d135d980e6780c
+    
+    also
+    https://groups.google.com/g/mechanical-sympathy/c/i3-M2uCYTJE?pli=1
+    
+    
+    --------
+    
+    Claiming aligned length (8byte alignment e.g. 25Byte messages will claim  40 = (25 + 8header) + 7 to reach aligned 40) this is for atomic
+    reads. HOWEVER the required capacity is 48! This is so there is always a ZERO-ed header so if consumer reaches it, it stops
+    
+    -------
+    tryClaim is supposed to be used with buffer(). The try claim here will claim the aligned length
+    
+    ------
+    
+    
+tryClaim and write will place a store barrier just after the record has been marked (neg len is written). 
+This is to guarantee that the very first visible write is marking the record.
+
+Having said that the consumer will not do anything on the read if that INT is <= 0, so it does not really matter 
+for consumer reads. 
+
+What is paramount is to make the record accessible after the buffer has been written.
+I think that if these instructions execute in order memory will be ok. However nothing stop
+the compiler to reorder the sequence. Here we rely on JCStress of agrona (I think)
+
+        
+        buffer.putBytes(encodedMsgOffset(recordIndex), srcBuffer, offset, length);
+        buffer.putInt(typeOffset(recordIndex), msgTypeId);
+        buffer.putIntOrdered(lengthOffset(recordIndex), recordLength);
+        
+        
+------
+Producer need to seek the consumer to know not to override it. To improve performance consumer index is tracked with a fast path CACHED_CONSUMER_INDEX, CONSUMER_INDEX.
+The difference is how they are read from the buffer (plain or volatile). The cached index will always be correct or a bit stale, this might lead to false negatives( we will think that buffer is
+full when actually is not) if we encounter full buffer then we check the volatile.
+
+
+-----
+Write Stages
+
+1-> Claim Space. This will bump the producer index 
+        Calculate the alingned length
+        a. Not enough space due to consumer?  Check real consumer index, if still not enough capacity return false
+        b. Not enough space till end of file? Mark as PADDING till the end and claim from beginning. There is just enough space to write go to c, there is plenty of more space for to d
+        c. Move the tail index (producer) and mark the very first 8 bytes of the file as 0. **This is so the consumer can stop there
+        d. Mover the tail index and mark the 8bytes AFTER the aligned record length as 0. **This is so the consumer can stop there
+        
+NOTE that if buffer is full we are not zeroing the   next header which seems to cause a consumer bug if producer never writes again!
+OK We do not suffer  from this because in the claim capacity we ask for aligned record length + HEADER LENGTH (the next records )
+
+(IF no other operation occurs from producer, consumer will be blocked here)
+
+2-> Mark the record with negative length. After that step the record index is allowed to be aborted / commited (even though the messages is missing)
+
+(IF no other operation occurs from producer, consumer will be blocked here (we fixed this with unblock))
+
+
+3 -> Write the message, the messages type, and make it visible to consumer by negating the MARK 
+
+
+The write need to be completed or RB is in partial state
+----
