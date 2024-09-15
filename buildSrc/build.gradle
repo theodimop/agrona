@@ -13,19 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.agrona;
+repositories {
+    mavenLocal()
+    mavenCentral()
+}
 
-import org.junit.jupiter.api.Test;
-
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-
-@SuppressWarnings("removal")
-@Deprecated(forRemoval = true)
-class UnsafeAccessTest
-{
-    @Test
-    void shouldProvideAccessToUnsafe()
-    {
-        assertNotNull(UnsafeAccess.UNSAFE);
-    }
+dependencies {
+    implementation libs.byteBuddy.gradle.plugin
+    compileOnly libs.findbugs
 }

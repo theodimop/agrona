@@ -13,22 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-buildscript {
-    repositories {
-        gradlePluginPortal()
-        mavenCentral()
-    }
-    dependencies {
-        classpath 'org.ow2.asm:asm:9.7'
-        classpath 'org.ow2.asm:asm-commons:9.7'
-    }
-}
-
 plugins {
     id 'java-library'
-    id 'com.gradleup.shadow' version '8.3.0' apply false
-    id 'biz.aQute.bnd.builder' version '7.0.0' apply false
-    id 'com.github.ben-manes.versions' version '0.51.0'
+    alias(libs.plugins.bnd).apply(false)
+    alias(libs.plugins.shadow).apply(false)
+    alias(libs.plugins.versions)
 }
 
 defaultTasks 'clean', 'build'
@@ -56,17 +45,6 @@ def toolchainCompiler = javaToolchains.compilerFor {
 def toolchainJavadocTool = javaToolchains.javadocToolFor {
     languageVersion = JavaLanguageVersion.of(buildJavaVersion)
 }
-
-def byteBuddyVersion = '1.15.1'
-def findbugsAnnotationsVersion = '3.0.1'
-def checkstyleVersion = '10.18.0'
-def hamcrestVersion = '3.0'
-def mockitoVersion = '5.13.0'
-def junitVersion = '5.11.0'
-def guavaTestLib = '33.3.0-jre'
-def junit4Version = '4.13.2'
-def jmhVersion = '1.37'
-def jcstressVersion = '0.16'
 
 def agronaGroup = 'org.agrona'
 def agronaVersion = file('version.txt').text.trim()
@@ -158,6 +136,7 @@ def projectPom = {
 
 allprojects {
     repositories {
+        mavenLocal()
         mavenCentral()
     }
 
@@ -165,9 +144,9 @@ allprojects {
         resolutionStrategy {
             failOnVersionConflict()
 
-            force "junit:junit:${junit4Version}",
-                  "net.bytebuddy:byte-buddy:${byteBuddyVersion}",
-                  "net.bytebuddy:byte-buddy-agent:${byteBuddyVersion}",
+            force libs.junit4,
+                  libs.byteBuddy,
+                  libs.byteBuddy.agent,
                   // patching conflicting Checkstyle dependencies
                   "org.codehaus.plexus:plexus-utils:3.3.0",
                   "org.apache.commons:commons-lang3:3.8.1",
@@ -190,7 +169,7 @@ subprojects {
     group = agronaGroup
     version = agronaVersion
 
-    checkstyle.toolVersion = "${checkstyleVersion}"
+    checkstyle.toolVersion = libs.versions.checkstyle.get()
 
     java {
         toolchain {
@@ -222,12 +201,10 @@ subprojects {
     }
 
     test {
+        jvmArgs('--add-opens', 'java.base/jdk.internal.misc=ALL-UNNAMED')
+
         if (buildJavaVersion >= 21) {
             jvmArgs('-XX:+EnableDynamicAgentLoading')
-        }
-
-        if (buildJavaVersion >= 23) {
-            jvmArgs('--sun-misc-unsafe-memory-access=allow')
         }
 
         useJUnitPlatform()
@@ -274,17 +251,18 @@ project(':agrona') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
     apply plugin: 'biz.aQute.bnd.builder'
+    apply plugin: 'net.bytebuddy.byte-buddy-gradle-plugin'
 
     dependencies {
-        testImplementation files('build/classes/java/generated')
-        testImplementation "org.hamcrest:hamcrest:${hamcrestVersion}"
-        testImplementation platform("org.junit:junit-bom:${junitVersion}")
+        testImplementation files("${layout.buildDirectory.get()}/classes/java/generated")
+        testImplementation platform("org.junit:junit-bom:${libs.versions.junit5.get()}")
         testImplementation "org.junit.jupiter:junit-jupiter-params"
-        testImplementation "org.mockito:mockito-core:${mockitoVersion}"
-        testImplementation "com.google.guava:guava-testlib:${guavaTestLib}"
-        testImplementation "junit:junit:${junit4Version}" // Compatibility with JUnit 4
-        testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine"
-        testRuntimeOnly "org.junit.vintage:junit-vintage-engine"
+        testImplementation libs.hamcrest
+        testImplementation libs.mockito
+        testImplementation libs.guava
+        testImplementation libs.junit4 // Compatibility with JUnit 4
+        testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
+        testRuntimeOnly 'org.junit.vintage:junit-vintage-engine'
         testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     }
 
@@ -302,9 +280,19 @@ project(':agrona') {
         outputs.dir generatedDir
     }
 
-    compileGeneratedJava.dependsOn generatePrimitiveSpecialisations
+    tasks.register('generateUnsafeApi', org.agrona.build.UnsafeApiSourceGenerator) {
+        outputDirectory = sourceSets.named('main').get().allJava.getSourceDirectories().singleFile
+    }
+
+    compileGeneratedJava.dependsOn('generatePrimitiveSpecialisations')
     compileTestJava.dependsOn compileGeneratedJava
-    javadoc.dependsOn generatePrimitiveSpecialisations
+    javadoc.dependsOn('generatePrimitiveSpecialisations')
+
+    byteBuddy {
+        transformation {
+            plugin = org.agrona.build.UnsafeApiBytecodeGenerator.class
+        }
+    }
 
     jar {
         from sourceSets.generated.output
@@ -328,7 +316,7 @@ project(':agrona') {
     }
 
     tasks.register('sourcesJar', Jar) {
-        dependsOn generatePrimitiveSpecialisations
+        dependsOn ('generatePrimitiveSpecialisations')
         archiveClassifier.set('sources')
         from sourceSets.main.allSource
         from sourceSets.generated.allSource
@@ -336,6 +324,7 @@ project(':agrona') {
 
     javadoc {
         source += sourceSets.generated.allJava
+        exclude 'org/agrona/UnsafeApi.java'
     }
 
     java {
@@ -378,15 +367,14 @@ project(':agrona-agent') {
 
     dependencies {
         implementation project(':agrona')
-        implementation "net.bytebuddy:byte-buddy:${byteBuddyVersion}"
-        // Avoid Javac warning about missing dependency from ByteBuddy
-        compileOnly "com.google.code.findbugs:findbugs-annotations:${findbugsAnnotationsVersion}"
-        testCompileOnly "com.google.code.findbugs:findbugs-annotations:${findbugsAnnotationsVersion}"
-        testImplementation platform("org.junit:junit-bom:${junitVersion}")
-        testImplementation "org.junit.jupiter:junit-jupiter-params"
-        testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine"
+        implementation libs.byteBuddy
+        compileOnly libs.findbugs
+        testCompileOnly libs.findbugs
+        testImplementation platform("org.junit:junit-bom:${libs.versions.junit5.get()}")
+        testImplementation 'org.junit.jupiter:junit-jupiter-params'
+        testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
         testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-        testImplementation "net.bytebuddy:byte-buddy-agent:${byteBuddyVersion}"
+        testImplementation libs.byteBuddy.agent
     }
 
     shadowJar {
@@ -463,8 +451,8 @@ project(':agrona-benchmarks') {
     apply plugin: 'com.gradleup.shadow'
 
     dependencies {
-        implementation "org.openjdk.jmh:jmh-core:${jmhVersion}"
-        annotationProcessor "org.openjdk.jmh:jmh-generator-annprocess:${jmhVersion}"
+        implementation libs.jmh.core
+        annotationProcessor libs.jmh.generator.annprocess
         implementation project(':agrona')
     }
 
@@ -481,8 +469,8 @@ project(':agrona-concurrency-tests') {
     apply plugin: 'com.gradleup.shadow'
 
     dependencies {
-        annotationProcessor "org.openjdk.jcstress:jcstress-core:${jcstressVersion}"
-        implementation "org.openjdk.jcstress:jcstress-core:${jcstressVersion}"
+        annotationProcessor libs.jcstress.core
+        implementation libs.jcstress.core
         implementation project(':agrona')
     }
 
@@ -504,7 +492,7 @@ project(':agrona-concurrency-tests') {
         dependsOn shadowJar
         classpath = files(tasks.shadowJar)
         workingDir = layout.buildDirectory.get()
-        args = ['-jvmArgs', '-Dagrona.disable.bounds.checks=true -Dagrona.strict.alignment.checks=true -XX:+UseParallelGC', '-r', 'reports/jcstress']
+        args = ['-jvmArgs', '--add-opens java.base/jdk.internal.misc=ALL-UNNAMED -Dagrona.disable.bounds.checks=true -Dagrona.strict.alignment.checks=true -XX:+UseParallelGC', '-r', 'reports/jcstress']
         standardOutput = new NullOutputStream()
         errorOutput = new NullOutputStream()
     }
@@ -521,7 +509,7 @@ project(':agrona-concurrency-tests') {
 }
 
 tasks.register('testReport', TestReport) {
-    destinationDirectory = file("$buildDir/reports/allTests")
+    destinationDirectory = file("${layout.buildDirectory.get()}/reports/allTests")
     // Include the results from the `test` task in all subprojects
     testResults.setFrom(subprojects*.test)
 }
@@ -551,7 +539,7 @@ tasks.register('copyTestLogs', Copy) {
 }
 
 wrapper {
-    gradleVersion = '8.10'
+    gradleVersion = '8.10.1'
     distributionType = 'ALL'
 }
 
